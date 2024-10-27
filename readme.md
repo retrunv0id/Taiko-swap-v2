@@ -38,7 +38,7 @@ Bot ini digunakan untuk melakukan operasi deposit dan withdraw otomatis pada jar
 5. Start bot:
 
    ```bash
-   npm start
+   node swap.js
    ```
 
 ## Keamanan
