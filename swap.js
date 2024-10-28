@@ -5,7 +5,6 @@ const cron = require('node-cron');
 const swap_ABI = require('./weth_abi');
 require('dotenv').config();
 
-// Array of RPC endpoints for failover
 const RPC_ENDPOINTS = [
     "https://rpc.taiko.xyz",
     "https://rpc.ankr.com/taiko",
@@ -13,25 +12,111 @@ const RPC_ENDPOINTS = [
     "https://taiko-rpc.publicnode.com",
 ];
 
+let currentRPCIndex = 0;
 let provider;
 let wethContract;
 
-// Initialize provider with retry logic
-async function createProvider() {
-    for (const rpc of RPC_ENDPOINTS) {
-        try {
-            const provider = new ethers.providers.JsonRpcProvider(rpc);
-            await provider.getBlockNumber(); // Test the connection
-            console.log(chalk.green(`📡 Connected to RPC: ${rpc}`));
-            return provider;
-        } catch (error) {
-            console.log(chalk.yellow(`⚠️ Failed to connect to ${rpc}, trying next...`));
+// Fungsi untuk tes kecepatan dan keandalan RPC
+async function testRPC(rpcUrl) {
+    try {
+        const startTime = Date.now();
+        const tempProvider = new ethers.providers.JsonRpcProvider(rpcUrl);
+        
+        // Test basic RPC calls
+        const [blockNumber, gasPrice] = await Promise.all([
+            tempProvider.getBlockNumber(),
+            tempProvider.getGasPrice()
+        ]);
+
+        const responseTime = Date.now() - startTime;
+
+        // Verifikasi respons valid
+        if (!blockNumber || !gasPrice) {
+            throw new Error('Invalid RPC response');
         }
+
+        return {
+            url: rpcUrl,
+            responseTime,
+            isValid: true
+        };
+    } catch (error) {
+        return {
+            url: rpcUrl,
+            responseTime: Infinity,
+            isValid: false,
+            error: error.message
+        };
     }
-    throw new Error('All RPC endpoints failed');
 }
 
-// Initialize contracts and wallets
+// Fungsi untuk mencari RPC terbaik
+async function findBestRPC() {
+    console.log(chalk.yellow('🔍 Mencari RPC terbaik...'));
+    
+    const results = await Promise.all(RPC_ENDPOINTS.map(async (rpc) => {
+        const result = await testRPC(rpc);
+        return result;
+    }));
+
+    // Filter RPC yang valid dan urutkan berdasarkan kecepatan respons
+    const validRPCs = results
+        .filter(result => result.isValid)
+        .sort((a, b) => a.responseTime - b.responseTime);
+
+    if (validRPCs.length === 0) {
+        throw new Error('Tidak ada RPC yang tersedia saat ini');
+    }
+
+    // Pilih RPC tercepat
+    const bestRPC = validRPCs[0];
+    console.log(chalk.green(`✅ RPC terbaik ditemukan: ${bestRPC.url} (${bestRPC.responseTime}ms)`));
+    
+    return bestRPC.url;
+}
+
+// Initialize provider dengan pemilihan RPC terbaik
+async function createProvider() {
+    try {
+        const bestRPC = await findBestRPC();
+        const newProvider = new ethers.providers.JsonRpcProvider(bestRPC);
+        await newProvider.getBlockNumber(); // Test koneksi final
+        console.log(chalk.green(`📡 Terhubung ke RPC: ${bestRPC}`));
+        return newProvider;
+    } catch (error) {
+        console.error(chalk.red(`⚠️ Gagal menghubungkan ke semua RPC: ${error.message}`));
+        throw error;
+    }
+}
+
+// Fungsi untuk mengganti RPC jika terjadi error
+async function switchToNextRPC() {
+    console.log(chalk.yellow('🔄 Mencari RPC alternatif...'));
+    
+    // Simpan index RPC sebelumnya
+    const previousRPCIndex = currentRPCIndex;
+    
+    // Loop sampai menemukan RPC yang berfungsi atau sudah mencoba semua
+    while (true) {
+        currentRPCIndex = (currentRPCIndex + 1) % RPC_ENDPOINTS.length;
+        
+        // Jika sudah mencoba semua RPC, cari yang terbaik lagi
+        if (currentRPCIndex === previousRPCIndex) {
+            return await createProvider();
+        }
+
+        try {
+            const tempProvider = new ethers.providers.JsonRpcProvider(RPC_ENDPOINTS[currentRPCIndex]);
+            await tempProvider.getBlockNumber(); // Test koneksi
+            console.log(chalk.green(`📡 Beralih ke RPC: ${RPC_ENDPOINTS[currentRPCIndex]}`));
+            return tempProvider;
+        } catch (error) {
+            console.log(chalk.yellow(`⚠️ RPC ${RPC_ENDPOINTS[currentRPCIndex]} tidak merespons, mencoba yang lain...`));
+            continue;
+        }
+    }
+}
+
 async function initialize() {
     provider = await createProvider();
     wethContract = new ethers.Contract(process.env.WETH_CA, swap_ABI, provider);
@@ -131,7 +216,6 @@ async function displayInitialPoints(wallet) {
     }
 }
 
-
 async function getPointsDifference(wallet, initialPoints) {
     try {
         const currentPoints = await fetchTaikoPoints(wallet.address);
@@ -150,13 +234,11 @@ async function getPointsDifference(wallet, initialPoints) {
     }
 }
 
-
 function getRandomAmount() {
     const min = parseFloat(process.env.RANDOM_AMOUNT_MIN);
     const max = parseFloat(process.env.RANDOM_AMOUNT_MAX);
     return (Math.random() * (max - min) + min).toFixed(8).toString();
 }
-
 
 async function waitForTransactions(transactions) {
     const frames = [
@@ -228,16 +310,7 @@ async function waitForTransactions(transactions) {
     }
 }
 
-// Function untuk menampilkan progress bar
-function getProgressBar(percent) {
-    const width = 20;
-    const complete = Math.round(width * (percent / 100));
-    const incomplete = width - complete;
-    const bar = '█'.repeat(complete) + '▒'.repeat(incomplete);
-    return `[${bar}] ${percent}%`;
-}
-
-async function performTransactions(wallets, isDeposit = true) {
+async function performTransactions(wallets, isDeposit = true, retryCount = 0) {
     try {
         const gasPrice = ethers.utils.parseUnits('0.11', 'gwei');
 
@@ -282,7 +355,6 @@ async function performTransactions(wallets, isDeposit = true) {
             }
         }
 
-        // Tunggu konfirmasi transaksi dengan animasi
         const receipts = await waitForTransactions(transactions);
 
         // Process results
@@ -300,9 +372,21 @@ async function performTransactions(wallets, isDeposit = true) {
     } catch (error) {
         console.error(chalk.red(`⚠️ Kesalahan Transaksi: ${error.message}`));
         
-        if (error.code === 'SERVER_ERROR' || error.message.includes('network')) {
-            console.log(chalk.yellow('🔄 Mencoba menghubungkan ulang ke RPC...'));
-            await initialize();
+        if ((error.code === 'SERVER_ERROR' || error.message.includes('network')) && retryCount < 3) {
+            console.log(chalk.yellow('🔎 Menganalisis masalah koneksi...'));
+            
+            try {
+                // Coba tes RPC saat ini
+                await provider.getBlockNumber();
+            } catch (rpcError) {
+                console.log(chalk.yellow('📡 RPC saat ini tidak merespons, mencari alternatif...'));
+                provider = await switchToNextRPC();
+                wethContract = new ethers.Contract(process.env.WETH_CA, swap_ABI, provider);
+            }
+
+            console.log(chalk.yellow('🔄 Mengulang transaksi pada loop yang sama...'));
+            await delay(3000);
+            return performTransactions(wallets, isDeposit, retryCount + 1);
         }
         
         throw error;
@@ -330,10 +414,33 @@ async function retrunvoid() {
             console.log(chalk.yellow(`\n🔄 Siklus Transaksi ${i + 1}/80`));
             console.log('-------------------------------------------------------------');
 
-            await performTransactions(wallets, true);
+            let depositSuccess = false;
+            let withdrawSuccess = false;
+            
+            // Mencoba deposit sampai berhasil
+            while (!depositSuccess) {
+                try {
+                    await performTransactions(wallets, true);
+                    depositSuccess = true;
+                } catch (error) {
+                    console.log(chalk.red('❌ Gagal melakukan deposit, mencoba lagi dalam 5 detik...'));
+                    await delay(5000);
+                }
+            }
+            
             await countdown(30);
 
-            await performTransactions(wallets, false);
+            // Mencoba withdraw sampai berhasil
+            while (!withdrawSuccess) {
+                try {
+                    await performTransactions(wallets, false);
+                    withdrawSuccess = true;
+                } catch (error) {
+                    console.log(chalk.red('❌ Gagal melakukan withdraw, mencoba lagi dalam 5 detik...'));
+                    await delay(5000);
+                }
+            }
+            
             await countdown(30);
         }
 
@@ -344,7 +451,6 @@ async function retrunvoid() {
         }
     } catch (error) {
         console.error(chalk.red('⚠️ Kesalahan fatal:', error.message));
-        // Wait before retrying the entire process
         await delay(5000);
         console.log(chalk.yellow('🔄 Mencoba menjalankan ulang bot...'));
         await retrunvoid();
