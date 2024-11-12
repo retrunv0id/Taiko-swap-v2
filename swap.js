@@ -7,9 +7,7 @@ require('dotenv').config();
 
 const RPC_ENDPOINTS = [
     "https://rpc.taiko.xyz",
-    "https://rpc.ankr.com/taiko",
     "https://rpc.mainnet.taiko.xyz",
-    "https://taiko-rpc.publicnode.com",
 ];
 
 let currentRPCIndex = 0;
@@ -312,7 +310,8 @@ async function waitForTransactions(transactions) {
 
 async function performTransactions(wallets, isDeposit = true, retryCount = 0) {
     try {
-        const gasPrice = ethers.utils.parseUnits('0.11', 'gwei');
+        // Ambil harga gas secara dinamis dari provider (RPC)
+        const gasPrice = await provider.getGasPrice();
 
         // Display initial balances
         for (let i = 0; i < wallets.length; i++) {
@@ -334,7 +333,7 @@ async function performTransactions(wallets, isDeposit = true, retryCount = 0) {
                 const tx = await withRetry(async () => {
                     return await wethContract.connect(wallets[i]).deposit({
                         value: amountToDeposit,
-                        gasPrice: gasPrice,
+                        gasPrice: gasPrice,  // Menggunakan gasPrice yang didapatkan dari RPC
                         gasLimit: 100000
                     });
                 });
@@ -347,7 +346,7 @@ async function performTransactions(wallets, isDeposit = true, retryCount = 0) {
 
                 const tx = await withRetry(async () => {
                     return await wethContract.connect(wallets[i]).withdraw(wethBalance, {
-                        gasPrice: gasPrice,
+                        gasPrice: gasPrice,  // Menggunakan gasPrice yang didapatkan dari RPC
                         gasLimit: 100000
                     });
                 });
@@ -365,16 +364,16 @@ async function performTransactions(wallets, isDeposit = true, retryCount = 0) {
 
             console.log(chalk.magenta(`🏆 POIN Akun ${index + 1}: ${pointsDiff ? `+${pointsDiff.totalPoints.toFixed(5)}` : 'SUDAH MENCAPAI LIMIT HARIAN'}`));
             console.log(chalk.cyan(`💎 Saldo Terbaru Akun ${index + 1}: ${newBalances.eth} ETH | ${newBalances.weth} WETH`));
-            console.log(chalk.cyan(`📌 TX Akun ${index + 1}: https://taikoscan.io/tx/${receipts[i].transactionHash}`));
+            console.log(chalk.cyan(`📌 TX Akun ${index + 1}: https://taikoexplorer.com/tx/${receipts[i].transactionHash}`));
         }
 
         console.log('-------------------------------------------------------------');
     } catch (error) {
         console.error(chalk.red(`⚠️ Kesalahan Transaksi: ${error.message}`));
-        
+
         if ((error.code === 'SERVER_ERROR' || error.message.includes('network')) && retryCount < 3) {
             console.log(chalk.yellow('🔎 Menganalisis masalah koneksi...'));
-            
+
             try {
                 // Coba tes RPC saat ini
                 await provider.getBlockNumber();
@@ -388,10 +387,11 @@ async function performTransactions(wallets, isDeposit = true, retryCount = 0) {
             await delay(3000);
             return performTransactions(wallets, isDeposit, retryCount + 1);
         }
-        
+
         throw error;
     }
 }
+
 
 async function retrunvoid() {
     try {
